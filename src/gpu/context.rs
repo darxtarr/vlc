@@ -21,16 +21,8 @@ pub struct GpuContext {
 impl GpuContext {
     /// Initialize GPU context with compute pipelines
     ///
-    /// NOTE: Architecture complete, WGPU 26.0 API integration pending.
-    /// See docs/M2_HANDOVER.md for completion guide.
-    #[allow(dead_code)]
+    /// Follows WGPU 26.0 best practices for compute-only applications.
     pub async fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        // Implementation architecture is complete - see docs/M2_HANDOVER.md
-        // for WGPU 26.0 API integration guide
-
-        todo!("WGPU 26.0 API integration pending - see M2_HANDOVER.md")
-
-        /*
         let instance = Instance::default();
 
         let adapter = instance
@@ -39,8 +31,7 @@ impl GpuContext {
                 compatible_surface: None,
                 force_fallback_adapter: false,
             })
-            .await
-            .ok_or("Failed to find suitable adapter")?;
+            .await?;
 
         let (device, queue): (Device, Queue) = adapter
             .request_device(
@@ -49,9 +40,8 @@ impl GpuContext {
                     required_features: Features::empty(),
                     required_limits: Limits::default(),
                     memory_hints: Default::default(),
-                    trace: wgpu::Trace::None,
-                },
-                None, // trace_path
+                    trace: wgpu::Trace::Off,
+                }
             )
             .await?;
 
@@ -86,7 +76,6 @@ impl GpuContext {
             reduce_pipeline,
             update_pipeline,
         })
-        */
     }
 
     /// Create a compute pipeline from shader

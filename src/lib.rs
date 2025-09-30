@@ -12,7 +12,7 @@ pub mod gpu;
 // Re-export core types
 pub use types::{CompressedIndex, AnchorSet, Assignments};
 pub use io::{read_index, write_index};
-pub use anneal::{AnnealingConfig, compress};
+pub use anneal::{AnnealingConfig, compress, compress_gpu};
 
 /// Our magic number for file headers
 pub const VLC_MAGIC: u32 = 0x564C4341; // "VLCA" in hex

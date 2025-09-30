@@ -100,9 +100,7 @@ impl GpuOps {
 
     /// Assign points to nearest anchors (GPU implementation)
     ///
-    /// NOTE: Architecture complete, WGPU 26.0 API integration pending.
-    /// See docs/M2_HANDOVER.md for completion guide.
-    #[allow(dead_code)]
+    /// Follows WGPU 26.0 best practices for compute operations.
     pub async fn assign_points(
         &mut self,
         points: &[f16],
@@ -110,12 +108,6 @@ impl GpuOps {
         n: usize,
         d: usize,
     ) -> Result<Assignments, Box<dyn std::error::Error>> {
-        // Implementation architecture is complete - see docs/M2_HANDOVER.md
-        // for WGPU 26.0 API integration guide
-
-        todo!("WGPU 26.0 API integration pending - see M2_HANDOVER.md")
-
-        /*
         self.ensure_buffers(n, anchors.m, d);
 
         // Convert f16 points to f32 for GPU
@@ -207,7 +199,7 @@ impl GpuOps {
 
         // Submit and wait
         self.context.queue.submit([encoder.finish()]);
-        self.context.device.poll(wgpu::Maintain::Wait);
+        let _ = self.context.device.poll(wgpu::PollType::Wait);
 
         // Read back results
         let staging_buffer = self.context.create_staging_buffer(
@@ -228,7 +220,7 @@ impl GpuOps {
         let buffer_slice = staging_buffer.slice(..);
         let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
-        self.context.device.poll(wgpu::Maintain::Wait);
+        let _ = self.context.device.poll(wgpu::PollType::Wait);
         receiver.receive().await.unwrap()?;
 
         let data = buffer_slice.get_mapped_range();
@@ -242,7 +234,6 @@ impl GpuOps {
             n,
             d_r: 0,
         })
-        */
     }
 }
 

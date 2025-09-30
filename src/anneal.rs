@@ -2,6 +2,7 @@
 
 use crate::types::{AnchorSet, Assignments, CompressedIndex, IndexMetadata, AnnealState};
 use crate::ops;
+use crate::gpu::{GpuContext, GpuOps};
 use half::f16;
 
 /// Configuration for annealing process
@@ -209,6 +210,114 @@ fn l2_distance_f16(a: &[f16], b: &[f16]) -> f32 {
     sum
 }
 
+/// GPU-accelerated compression function
+///
+/// This is a parallel implementation that uses GPU for expensive operations
+/// while keeping CPU compress() completely untouched for safety.
+pub async fn compress_gpu(
+    points: &[f16],
+    n: usize,
+    d: usize,
+    config: AnnealingConfig,
+) -> Result<CompressedIndex, Box<dyn std::error::Error>> {
+    // Initialize GPU context
+    let gpu_ctx = std::sync::Arc::new(GpuContext::new().await?);
+    let mut gpu_ops = GpuOps::new(gpu_ctx);
+
+    // Initialize anchors (same k-means++ as CPU)
+    let mut anchors = initialize_anchors(points, n, d, config.m);
+
+    // Initialize state
+    let mut state = AnnealState::new(config.initial_temp);
+    let mut assignments = Assignments::new(n);
+    let mut prev_energy = f32::INFINITY;
+    let mut stable_iters = 0;
+
+    println!("GPU compression: n={}, d={}, m={}", n, d, config.m);
+
+    // Main annealing loop
+    while state.iteration < config.max_iterations && !state.converged {
+        // Store old assignments
+        let old_assignments = assignments.clone();
+
+        // Step 1: Assign points to anchors (GPU-accelerated!)
+        assignments = gpu_ops.assign_points(points, &anchors, n, d).await?;
+
+        // Step 2: Compute robust statistics (CPU for now)
+        let stats = ops::compute_robust_stats(
+            points,
+            &assignments,
+            &anchors,
+            config.trim_percent,
+        );
+
+        // Step 3: Update anchors (CPU for now)
+        ops::update_anchors(
+            &mut anchors,
+            &stats,
+            state.temperature,
+            config.learning_rate,
+        );
+
+        // Step 4: Maintenance (if interval reached)
+        if state.iteration > 0 && state.iteration % config.maintenance_interval == 0 {
+            // TODO: Implement merge/split operations
+        }
+
+        // Compute energy and changes (CPU)
+        state.energy = ops::compute_energy(points, &anchors, &assignments);
+        state.assignment_changes = ops::count_assignment_changes(&old_assignments, &assignments);
+
+        // Check convergence: both energy stable AND assignments stable
+        let energy_change = (state.energy - prev_energy).abs();
+        let energy_stable = energy_change < config.energy_tolerance;
+        let assignments_stable = state.assignment_changes < config.min_assignment_changes;
+
+        if energy_stable && assignments_stable {
+            stable_iters += 1;
+            // Require 3 consecutive stable iterations to declare convergence
+            if stable_iters >= 3 {
+                state.converged = true;
+                println!("GPU: Converged after {} iterations (stable for {} iters)",
+                         state.iteration, stable_iters);
+            }
+        } else {
+            stable_iters = 0; // Reset if not stable
+        }
+
+        // Cool temperature
+        state.cool(config.cooling_rate);
+
+        // Log progress (minimal)
+        if state.iteration % 10 == 0 {
+            println!(
+                "GPU Iter {}: T={:.4}, E={:.4}, ΔE={:.6}, Changes={}",
+                state.iteration, state.temperature, state.energy, energy_change, state.assignment_changes
+            );
+        }
+
+        prev_energy = state.energy;
+    }
+
+    // Create compressed index
+    let metadata = IndexMetadata {
+        n_original: n,
+        d_original: d,
+        compression_ratio: compute_compression_ratio(n, d, config.m, &assignments),
+        iterations: state.iteration,
+        final_energy: state.energy,
+        has_jacobians: false,
+        has_residuals: false,
+        quantization: crate::types::QuantizationMode::F16,
+    };
+
+    Ok(CompressedIndex {
+        anchor_set: anchors,
+        assignments,
+        metadata,
+    })
+}
+
 /// Compute compression ratio
 fn compute_compression_ratio(
     n: usize,
@@ -217,7 +326,7 @@ fn compute_compression_ratio(
     assignments: &Assignments,
 ) -> f32 {
     let original_bytes = n * d * 4; // Assuming f32 originals
-    let compressed_bytes = 
+    let compressed_bytes =
         m * d * 2 + // anchors as f16
         n * 4 +     // assignments as u32
         if assignments.residuals.is_some() {
@@ -225,6 +334,6 @@ fn compute_compression_ratio(
         } else {
             0
         };
-    
+
     compressed_bytes as f32 / original_bytes as f32
 }
