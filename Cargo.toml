@@ -1,0 +1,36 @@
+[package]
+name = "vlc"
+version = "0.1.0"
+edition = "2021"
+authors = ["VLC Boutique"]
+description = "Vector-Lattice Compression: Learned Voronoi tessellation for embedding compression"
+
+[dependencies]
+# Core dependencies only - no bloat
+candle-core = "0.9"      # For CPU math operations
+wgpu = "26.0"            # For GPU compute kernels
+bytemuck = "1.19"        # For safe transmutes between types
+half = "2.4"             # For f16 support
+
+# Minimal additional deps
+memmap2 = "0.9"          # For memory-mapped file I/O
+
+[dev-dependencies]
+rand = "0.9"             # For testing with synthetic data
+criterion = "0.7"        # For benchmarking
+
+[[bin]]
+name = "vlc"
+path = "src/bin/vlc.rs"
+
+[lib]
+name = "vlc"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1            # Some optimization even in dev for tolerable speed
