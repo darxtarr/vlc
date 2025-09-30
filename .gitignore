@@ -1,0 +1,26 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# Test outputs
+test_vlc.*
+*.idx
+*.anchors.bin
+*.assign.bin
+*.jacobians.bin
+*.residuals.bin
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Benchmarking
+*.criterion/
+
+# Temporary files
+*.tmp
+tmp/
