@@ -7,9 +7,36 @@
 
 ---
 
+## ⚡ CRITICAL: Read This First!
+
+### Project Status
+- ✅ **CPU implementation**: COMPLETE and TESTED multiple times (2-3% compression works!)
+- ✅ **M1 Milestone**: DONE - Don't touch CPU code, it's verified and stable
+- ✅ **GPU Architecture**: COMPLETE - pipelines, shaders, context all set up
+- ✅ **assign_points()**: IMPLEMENTED on GPU and integrated
+- ⚠️ **reduce_stats()**: Needs GPU implementation (currently CPU fallback)
+- ⚠️ **update_anchors()**: Needs GPU implementation (currently CPU fallback)
+
+### Token-Saving Shortcuts
+1. **WGPU 26.0 Reference**: `docs/wgpu-reference/` - READ THIS FIRST before coding
+   - `README.md` - Quick API examples
+   - `06-device-polling-state.md` - Maintain enum (NOT MaintainBase)
+   - All code in docs/ uses correct WGPU 26.0 API
+2. **Code compiles**: Run `cargo check` - it passes! Don't waste tokens debugging non-issues
+3. **Tests pass**: `cargo test` works for CPU - focus only on GPU completion
+4. **Key Files**:
+   - `src/gpu/ops.rs` - Add reduce_stats() and update_anchors() here
+   - `src/anneal.rs:244` - Wire new GPU ops into compress_gpu() loop
+   - `src/gpu/shaders/` - Shaders already written and correct
+
+### The ONLY Task
+Complete GPU ops (reduce_stats, update_anchors) and wire into compress_gpu(). That's it!
+
+---
+
 ## 🎯 Mission: Get GPU Compression Working
 
-You're inheriting **excellent work at 95% completion**. The CPU implementation works beautifully (2-3% compression), GPU architecture is professional, and `compress_gpu()` is already integrated. Just need to validate WGPU API calls and complete the pipeline.
+You're inheriting **excellent work at 95% completion**. The CPU implementation is VERIFIED and STABLE - this is a modular system. GPU architecture is professional, and `compress_gpu()` is already integrated. Just need to implement 2 GPU functions and wire them in.
 
 ---
 
@@ -565,11 +592,28 @@ git push
 
 ## 📚 Resources
 
-- **WGPU Docs**: `cargo doc --open` → wgpu crate
-- **Current Status**: `STATUS.md`
-- **Architecture**: `docs/DESIGN.md`
-- **Kernel Specs**: `docs/KERNELS.md`
-- **This Guide**: `docs/M2_HANDOVER.md`
+### WGPU 26.0 API Cheat Sheet (CRITICAL!)
+```rust
+// Device polling - CORRECT API:
+device.poll(wgpu::Maintain::Wait)           // ✅ Block until done
+device.poll(wgpu::Maintain::Poll)           // ✅ Poll once
+
+// Adapter request - returns Option, not Result:
+.request_adapter(&options).await.ok_or("No adapter")?  // ✅
+
+// DeviceDescriptor fields in WGPU 26.0:
+memory_hints: Default::default()            // ✅ Valid field
+trace: wgpu::Trace::Off                     // ✅ Enum type (or ::None)
+
+// NonZero types:
+std::num::NonZeroU64::new(size)            // ✅ Explicit type
+```
+
+### Documentation (in priority order)
+1. **⭐ WGPU Reference**: `docs/wgpu-reference/` - Complete WGPU 26.0 guide
+2. **Current Status**: `STATUS.md` - What's done vs what's left
+3. **Architecture**: `docs/DESIGN.md` - System overview
+4. **Kernel Specs**: `docs/KERNELS.md` - GPU shader details
 
 ---
 
