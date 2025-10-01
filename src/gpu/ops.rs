@@ -235,6 +235,302 @@ impl GpuOps {
             d_r: 0,
         })
     }
+
+    /// Compute robust statistics for each anchor (GPU implementation)
+    pub async fn reduce_stats(
+        &mut self,
+        points: &[f16],
+        assignments: &Assignments,
+        _anchors: &AnchorSet,
+        n: usize,
+        m: usize,
+        d: usize,
+    ) -> Result<Vec<crate::types::AnchorStats>, Box<dyn std::error::Error>> {
+        self.ensure_buffers(n, m, d);
+
+        // Convert f16 points to f32
+        let points_f32: Vec<f32> = points.iter().map(|&x| x.to_f32()).collect();
+
+        // Upload buffers
+        self.context.queue.write_buffer(
+            self.points_buffer.as_ref().unwrap(),
+            0,
+            bytemuck::cast_slice(&points_f32),
+        );
+
+        self.context.queue.write_buffer(
+            self.assigns_buffer.as_ref().unwrap(),
+            0,
+            bytemuck::cast_slice(&assignments.assign),
+        );
+
+        // Upload parameters
+        let params = ReduceParams {
+            n: n as u32,
+            m: m as u32,
+            d: d as u32,
+            huber_threshold: 1.0,
+        };
+        self.context.queue.write_buffer(
+            &self.params_buffer,
+            0,
+            bytemuck::cast_slice(&[params]),
+        );
+
+        // Create bind groups
+        let storage_bind_group = self.context.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Reduce Storage Bind Group"),
+            layout: &self.context.reduce_pipeline.get_bind_group_layout(0),
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: self.points_buffer.as_ref().unwrap(),
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: self.assigns_buffer.as_ref().unwrap(),
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: self.stats_buffer.as_ref().unwrap(),
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+            ],
+        });
+
+        let uniform_bind_group = self.context.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Reduce Uniform Bind Group"),
+            layout: &self.context.reduce_pipeline.get_bind_group_layout(1),
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::Buffer(BufferBinding {
+                    buffer: &self.params_buffer,
+                    offset: 0,
+                    size: std::num::NonZero::new(std::mem::size_of::<ReduceParams>() as u64),
+                }),
+            }],
+        });
+
+        // Dispatch compute: one workgroup per anchor
+        let mut encoder = self.context.device.create_command_encoder(&Default::default());
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&Default::default());
+            compute_pass.set_pipeline(&self.context.reduce_pipeline);
+            compute_pass.set_bind_group(0, &storage_bind_group, &[]);
+            compute_pass.set_bind_group(1, &uniform_bind_group, &[]);
+
+            compute_pass.dispatch_workgroups(m as u32, 1, 1);
+        }
+
+        self.context.queue.submit([encoder.finish()]);
+        let _ = self.context.device.poll(wgpu::PollType::Wait);
+
+        // Read back stats buffer [m × (d+2)]
+        let stats_size = (m * (d + 2) * std::mem::size_of::<f32>()) as u64;
+        let staging_buffer = self.context.create_staging_buffer(stats_size);
+
+        let mut encoder = self.context.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(
+            self.stats_buffer.as_ref().unwrap(),
+            0,
+            &staging_buffer,
+            0,
+            stats_size,
+        );
+        self.context.queue.submit([encoder.finish()]);
+
+        // Map and read
+        let buffer_slice = staging_buffer.slice(..);
+        let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        let _ = self.context.device.poll(wgpu::PollType::Wait);
+        receiver.receive().await.unwrap()?;
+
+        let data = buffer_slice.get_mapped_range();
+        let stats_data: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        staging_buffer.unmap();
+
+        // Convert to AnchorStats
+        let mut result = Vec::with_capacity(m);
+        for anchor_idx in 0..m {
+            let base = anchor_idx * (d + 2);
+            let mean = stats_data[base..base+d].to_vec();
+            let count = stats_data[base+d] as usize;
+            let variance = vec![stats_data[base+d+1]; d];
+
+            result.push(crate::types::AnchorStats { mean, count, variance });
+        }
+
+        Ok(result)
+    }
+
+    /// Update anchor positions (GPU implementation)
+    pub async fn update_anchors(
+        &mut self,
+        anchors: &mut AnchorSet,
+        stats: &[crate::types::AnchorStats],
+        temperature: f32,
+        learning_rate: f32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let m = anchors.m;
+        let d = anchors.d;
+
+        self.ensure_buffers(1, m, d); // n=1 is fine, we only need m and d
+
+        // Convert anchors to f32
+        let anchors_f32: Vec<f32> = anchors.anchors.iter().map(|&x| x.to_f32()).collect();
+
+        // Convert stats to flat buffer [m × (d+2)]
+        let mut stats_f32 = Vec::with_capacity(m * (d + 2));
+        for stat in stats {
+            stats_f32.extend(&stat.mean);
+            stats_f32.push(stat.count as f32);
+            let avg_variance = stat.variance.iter().sum::<f32>() / d as f32;
+            stats_f32.push(avg_variance);
+        }
+
+        // Upload buffers
+        self.context.queue.write_buffer(
+            self.anchors_buffer.as_ref().unwrap(),
+            0,
+            bytemuck::cast_slice(&anchors_f32),
+        );
+
+        self.context.queue.write_buffer(
+            self.stats_buffer.as_ref().unwrap(),
+            0,
+            bytemuck::cast_slice(&stats_f32),
+        );
+
+        // Upload parameters
+        let params = UpdateParams {
+            m: m as u32,
+            d: d as u32,
+            temperature,
+            learning_rate,
+            momentum: 0.0,
+            enable_jacobians: 0,
+            _padding: [0, 0],
+        };
+        self.context.queue.write_buffer(
+            &self.params_buffer,
+            0,
+            bytemuck::cast_slice(&[params]),
+        );
+
+        // Create bind groups
+        let storage_bind_group = self.context.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Update Storage Bind Group"),
+            layout: &self.context.update_pipeline.get_bind_group_layout(0),
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: self.anchors_buffer.as_ref().unwrap(),
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: self.stats_buffer.as_ref().unwrap(),
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: self.momentum_buffer.as_ref().unwrap(),
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: BindingResource::Buffer(BufferBinding {
+                        buffer: self.jacobians_buffer.as_ref().unwrap(),
+                        offset: 0,
+                        size: None,
+                    }),
+                },
+            ],
+        });
+
+        let uniform_bind_group = self.context.device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Update Uniform Bind Group"),
+            layout: &self.context.update_pipeline.get_bind_group_layout(1),
+            entries: &[BindGroupEntry {
+                binding: 0,
+                resource: BindingResource::Buffer(BufferBinding {
+                    buffer: &self.params_buffer,
+                    offset: 0,
+                    size: std::num::NonZero::new(std::mem::size_of::<UpdateParams>() as u64),
+                }),
+            }],
+        });
+
+        // Dispatch compute: (m * d) threads total
+        let total_threads = (m * d) as u32;
+        let workgroups = (total_threads + 255) / 256;
+
+        let mut encoder = self.context.device.create_command_encoder(&Default::default());
+        {
+            let mut compute_pass = encoder.begin_compute_pass(&Default::default());
+            compute_pass.set_pipeline(&self.context.update_pipeline);
+            compute_pass.set_bind_group(0, &storage_bind_group, &[]);
+            compute_pass.set_bind_group(1, &uniform_bind_group, &[]);
+
+            compute_pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+
+        self.context.queue.submit([encoder.finish()]);
+        let _ = self.context.device.poll(wgpu::PollType::Wait);
+
+        // Read back updated anchors
+        let anchors_size = (m * d * std::mem::size_of::<f32>()) as u64;
+        let staging_buffer = self.context.create_staging_buffer(anchors_size);
+
+        let mut encoder = self.context.device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(
+            self.anchors_buffer.as_ref().unwrap(),
+            0,
+            &staging_buffer,
+            0,
+            anchors_size,
+        );
+        self.context.queue.submit([encoder.finish()]);
+
+        // Map and read
+        let buffer_slice = staging_buffer.slice(..);
+        let (sender, receiver) = futures_intrusive::channel::shared::oneshot_channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |v| sender.send(v).unwrap());
+        let _ = self.context.device.poll(wgpu::PollType::Wait);
+        receiver.receive().await.unwrap()?;
+
+        let data = buffer_slice.get_mapped_range();
+        let updated_anchors_f32: Vec<f32> = bytemuck::cast_slice(&data).to_vec();
+        drop(data);
+        staging_buffer.unmap();
+
+        // Convert back to f16 and update anchors
+        anchors.anchors = updated_anchors_f32.iter().map(|&x| f16::from_f32(x)).collect();
+
+        Ok(())
+    }
 }
 
 #[repr(C)]

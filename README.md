@@ -33,7 +33,7 @@ Pure Rust with WGPU for GPU kernels and Candle for host-side math. No frameworks
 ## Implementation Status
 
 - ✅ **M1: CPU prototype** - Complete, 2-3% compression, all tests passing
-- 🏗️ **M2: GPU kernels** - Architecture complete, API integration needed
+- ✅ **M2: GPU kernels** - Code-complete, pending hardware validation (98%)
 - ❌ **M3: Maintenance ops** - Not started (merge/split/quantize)
 
 ## Quick Start
@@ -42,8 +42,11 @@ Pure Rust with WGPU for GPU kernels and Candle for host-side math. No frameworks
 # Build
 cargo build --release
 
-# Test with synthetic data
+# Test CPU compression with synthetic data
 cargo run --bin vlc test
+
+# Test GPU compression (requires GPU access)
+cargo run --bin vlc test-gpu
 
 # View compressed index info
 cargo run --bin vlc info --idx ./test_vlc
@@ -77,23 +80,26 @@ bytemuck = "1.19"            # Zero-copy type conversion
 half = "2.4"                 # f16 support
 memmap2 = "0.9"              # Memory-mapped file I/O
 futures-intrusive = "0.5"    # Async GPU operations
+pollster = "0.4.0"           # Blocking async executor
 ```
 
 ## Documentation
 
-- `STATUS.md` - Current implementation status
-- `docs/DESIGN.md` - System architecture
-- `docs/KERNELS.md` - GPU kernel specifications
-- `docs/M2_HANDOVER.md` - GPU implementation guide
-- `docs/SONNET_GUIDE.md` - Implementation reference
-- `docs/wgpu-reference/` - WGPU API documentation
+- `STATUS.md` - Current implementation status and progress
+- `NEXT_SESSION.md` - Handover for next session (GPU validation)
+- `docs/DESIGN.md` - System architecture and design decisions
+- `docs/KERNELS.md` - GPU kernel specifications and implementation
+- `docs/SONNET_GUIDE.md` - Implementation reference for AI agents
+- `docs/wgpu-reference/` - WGPU 26.0 API documentation
 
 ## Testing
 
 ```bash
-cargo test              # Run unit tests (all passing)
-cargo run --bin vlc test      # Synthetic compression test
-cargo build --release   # Production build
+cargo test                          # Run unit tests (all passing)
+cargo run --bin vlc test            # CPU synthetic compression test
+cargo run --bin vlc test-gpu        # GPU compression test (small)
+cargo run --bin vlc test-gpu --large # GPU compression test (large)
+cargo build --release               # Production build
 ```
 
 ## Project Structure

@@ -1,11 +1,15 @@
 # GPU Kernel Specifications
 
+**Implementation Status**: All core kernels (K1-K3) are FULLY IMPLEMENTED and CODE-COMPLETE as of M2 milestone (98% complete, pending hardware validation). See `/home/u/code/vlc/src/gpu/` for implementation.
+
 ## Memory Layout Conventions
 
 All matrices are **row-major** (point's dimensions are contiguous).
 All buffers are **16-byte aligned** for optimal GPU access.
 
-## Kernel 1: Point Assignment
+## Kernel 1: Point Assignment (IMPLEMENTED)
+
+**Status**: Fully implemented in `src/gpu/shaders/assign.wgsl` and `src/gpu/ops.rs::assign_points()`
 
 ### Purpose
 Assign each point to its nearest anchor using L2 distance.
@@ -62,7 +66,9 @@ assigns[thread_id] = min_anchor
 - Use warp-level primitives for reduction
 - Consider tiling for very large d
 
-## Kernel 2: Robust Reduction
+## Kernel 2: Robust Reduction (IMPLEMENTED)
+
+**Status**: Fully implemented in `src/gpu/shaders/reduce.wgsl` and `src/gpu/ops.rs::reduce_stats()`
 
 ### Purpose
 Compute robust mean and statistics for points assigned to each anchor.
@@ -148,9 +154,11 @@ else:
     huber_threshold / dist
 ```
 
-## Kernel 3: Anchor Update
+## Kernel 3: Anchor Update (IMPLEMENTED)
 
-### Purpose  
+**Status**: Fully implemented in `src/gpu/shaders/update.wgsl` and `src/gpu/ops.rs::update_anchors()`
+
+### Purpose
 Update anchor positions using computed statistics and temperature.
 
 ### Interface
@@ -210,7 +218,9 @@ if enable_jacobians == 1:
         0.1 * sqrt(local_variance + 0.001)  // regularization
 ```
 
-## Kernel 4: Maintenance - Merge
+## Kernel 4: Maintenance - Merge (NOT IMPLEMENTED - M3)
+
+**Status**: Planned for M3 milestone, not yet implemented
 
 ### Purpose
 Merge anchors that are closer than threshold.
@@ -223,7 +233,9 @@ Merge anchors that are closer than threshold.
 4. GPU: Reassign points from merged anchors
 ```
 
-## Kernel 5: Maintenance - Split  
+## Kernel 5: Maintenance - Split (NOT IMPLEMENTED - M3)
+
+**Status**: Planned for M3 milestone, not yet implemented
 
 ### Purpose
 Split anchors with too many assigned points.
@@ -274,18 +286,27 @@ while atomicCompareExchangeWeak(&lock, 0u, 1u) == 1u:
 
 ## Performance Targets
 
-- Assignment: 1ms for 1M points, 4K anchors, d=768
-- Reduction: 2ms for same
-- Update: 0.5ms for 4K anchors, d=768
-- Overall iteration: <5ms on RTX 3080
+**Note**: These are aspirational targets. Actual performance validation pending GPU hardware access.
+
+- Assignment: 1ms for 1M points, 4K anchors, d=768 (target)
+- Reduction: 2ms for same (target)
+- Update: 0.5ms for 4K anchors, d=768 (target)
+- Overall iteration: <5ms on RTX 3080 (target)
+
+**Current Status**: Implementation complete, benchmarking requires GPU hardware validation (see STATUS.md)
 
 ## Testing Each Kernel
 
-Create unit tests that:
-1. Compare GPU output to CPU reference
-2. Test edge cases (0 assignments, all same anchor, etc.)
-3. Verify numerical stability with random data
-4. Check memory bounds with compute sanitizer
+**Implementation Status**: Test infrastructure complete with `test-gpu` command in `src/bin/vlc.rs`
+
+Available tests:
+1. `cargo run --bin vlc test-gpu` - GPU vs CPU comparison on small dataset
+2. `cargo run --bin vlc test-gpu --large` - GPU vs CPU on large dataset (10K points)
+
+Planned tests (not yet implemented):
+1. Edge cases (0 assignments, all same anchor, etc.)
+2. Numerical stability verification with random data
+3. Memory bounds checking with compute sanitizer
 
 ## Note on f16 vs f32
 

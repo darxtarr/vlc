@@ -15,6 +15,7 @@ half = "2.4"             # For f16 support
 # Minimal additional deps
 memmap2 = "0.9"          # For memory-mapped file I/O
 futures-intrusive = "0.5" # For async GPU operations
+pollster = "0.4.0"
 
 [dev-dependencies]
 rand = "0.9"             # For testing with synthetic data

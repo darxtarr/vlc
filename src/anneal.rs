@@ -243,21 +243,23 @@ pub async fn compress_gpu(
         // Step 1: Assign points to anchors (GPU-accelerated!)
         assignments = gpu_ops.assign_points(points, &anchors, n, d).await?;
 
-        // Step 2: Compute robust statistics (CPU for now)
-        let stats = ops::compute_robust_stats(
+        // Step 2: Compute robust statistics (GPU)
+        let stats = gpu_ops.reduce_stats(
             points,
             &assignments,
             &anchors,
-            config.trim_percent,
-        );
+            n,
+            anchors.m,
+            d,
+        ).await?;
 
-        // Step 3: Update anchors (CPU for now)
-        ops::update_anchors(
+        // Step 3: Update anchors (GPU)
+        gpu_ops.update_anchors(
             &mut anchors,
             &stats,
             state.temperature,
             config.learning_rate,
-        );
+        ).await?;
 
         // Step 4: Maintenance (if interval reached)
         if state.iteration > 0 && state.iteration % config.maintenance_interval == 0 {
