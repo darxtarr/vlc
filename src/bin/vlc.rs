@@ -13,6 +13,7 @@ fn main() {
         eprintln!("  query --idx <path> --k <k> (test retrieval with synthetic queries)");
         eprintln!("  test  (run with synthetic data)");
         eprintln!("  test-gpu  (run GPU compression test)");
+        eprintln!("  test-cuda  (run CUDA compression test with RTX 4080)");
         std::process::exit(1);
     }
     
@@ -171,6 +172,7 @@ fn main() {
             }
         }
 
+        #[cfg(feature = "gpu-wgpu")]
         "test-gpu" => {
             println!("Running GPU compression test...");
 
@@ -248,6 +250,92 @@ fn main() {
             println!("  Energy difference: {:.6} ({:.2}%)",
                 energy_diff,
                 energy_diff / cpu_result.metadata.final_energy * 100.0);
+        }
+
+        #[cfg(feature = "gpu-cuda")]
+        "test-cuda" => {
+            println!("🚀 Running CUDA compression test...");
+
+            // Parse optional size argument
+            let (n, d, m) = if args.len() > 2 && args[2] == "--large" {
+                (10000, 128, 256) // Large test
+            } else {
+                (1000, 64, 32) // Default test
+            };
+
+            println!("Generating {} points in {}D with {} anchors", n, d, m);
+
+            // Create three cluster centers
+            let centers = vec![
+                vec![0.0f32; d],  // Center at origin
+                vec![5.0f32; d],  // Center at (5,5,5,...)
+                vec![10.0f32; d], // Center at (10,10,10,...)
+            ];
+
+            // Generate points around centers
+            let mut points = Vec::with_capacity(n * d);
+            for i in 0..n {
+                let center_idx = i % 3;
+                let center = &centers[center_idx];
+
+                for j in 0..d {
+                    // Add small noise around center
+                    let noise = ((i * d + j) as f32 * 0.1).sin() * 0.5;
+                    let val = center[j] + noise;
+                    points.push(f16::from_f32(val));
+                }
+            }
+
+            let config = vlc::AnnealingConfig {
+                m,
+                initial_temp: 1.0,
+                cooling_rate: 0.05,
+                learning_rate: 0.2,
+                trim_percent: 0.1,
+                max_iterations: 50,
+                energy_tolerance: 1e-3,
+                min_assignment_changes: 1,
+                maintenance_interval: 20,
+            };
+
+            // Time CUDA
+            println!("\n🔥 Running CUDA compression on RTX 4080...");
+            let start = std::time::Instant::now();
+            let cuda_result = vlc::compress_cuda(&points, n, d, config.clone())
+                .unwrap();
+            let cuda_time = start.elapsed();
+
+            println!("\n⚡ CUDA Results:");
+            println!("  Time: {:?}", cuda_time);
+            println!("  Iterations: {}", cuda_result.metadata.iterations);
+            println!("  Final energy: {:.4}", cuda_result.metadata.final_energy);
+            println!("  Compression ratio: {:.2}%", cuda_result.metadata.compression_ratio * 100.0);
+
+            // Time CPU for comparison
+            println!("\n🐢 Running CPU compression for comparison...");
+            let start = std::time::Instant::now();
+            let cpu_result = vlc::compress(&points, n, d, config);
+            let cpu_time = start.elapsed();
+
+            println!("\n📊 CPU Results:");
+            println!("  Time: {:?}", cpu_time);
+            println!("  Iterations: {}", cpu_result.metadata.iterations);
+            println!("  Final energy: {:.4}", cpu_result.metadata.final_energy);
+            println!("  Compression ratio: {:.2}%", cpu_result.metadata.compression_ratio * 100.0);
+
+            // Compare
+            println!("\n🏆 Comparison:");
+            println!("  Speedup: {:.2}x", cpu_time.as_secs_f64() / cuda_time.as_secs_f64());
+            let energy_diff = (cuda_result.metadata.final_energy - cpu_result.metadata.final_energy).abs();
+            println!("  Energy difference: {:.6} ({:.2}%)",
+                energy_diff,
+                energy_diff / cpu_result.metadata.final_energy * 100.0);
+
+            if cuda_time.as_secs_f64() < cpu_time.as_secs_f64() {
+                println!("\n✨ CUDA is FASTER! 🚀");
+            } else {
+                println!("\n⚠️  CPU was faster (GPU overhead for small dataset)");
+            }
         }
 
         "query" => {

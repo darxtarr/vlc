@@ -2,7 +2,13 @@
 
 use crate::types::{AnchorSet, Assignments, CompressedIndex, IndexMetadata, AnnealState};
 use crate::ops;
+
+#[cfg(feature = "gpu-wgpu")]
 use crate::gpu::{GpuContext, GpuOps};
+
+#[cfg(feature = "gpu-cuda")]
+use crate::gpu::{CudaContext, CudaOps};
+
 use half::f16;
 
 /// Configuration for annealing process
@@ -231,10 +237,11 @@ fn l2_distance_f16(a: &[f16], b: &[f16]) -> f32 {
     sum
 }
 
-/// GPU-accelerated compression function
+/// GPU-accelerated compression function (WGPU backend)
 ///
 /// This is a parallel implementation that uses GPU for expensive operations
 /// while keeping CPU compress() completely untouched for safety.
+#[cfg(feature = "gpu-wgpu")]
 pub async fn compress_gpu(
     points: &[f16],
     n: usize,
@@ -336,6 +343,138 @@ pub async fn compress_gpu(
         if state.iteration % 10 == 0 {
             println!(
                 "GPU Iter {}: T={:.4}, E={:.4}, ΔE={:.6}, Changes={}",
+                state.iteration, state.temperature, state.energy, energy_change, state.assignment_changes
+            );
+        }
+
+        prev_energy = state.energy;
+    }
+
+    // Create compressed index
+    let metadata = IndexMetadata {
+        n_original: n,
+        d_original: d,
+        compression_ratio: compute_compression_ratio(n, d, config.m, &assignments),
+        iterations: state.iteration,
+        final_energy: state.energy,
+        has_jacobians: false,
+        has_residuals: false,
+        quantization: crate::types::QuantizationMode::F16,
+    };
+
+    Ok(CompressedIndex {
+        anchor_set: anchors,
+        assignments,
+        metadata,
+    })
+}
+
+/// CUDA-accelerated compression function
+///
+/// Similar to compress_gpu but using CUDA backend for NVIDIA GPUs.
+/// This is synchronous unlike the WGPU version.
+#[cfg(feature = "gpu-cuda")]
+pub fn compress_cuda(
+    points: &[f16],
+    n: usize,
+    d: usize,
+    config: AnnealingConfig,
+) -> Result<CompressedIndex, Box<dyn std::error::Error>> {
+    // Initialize CUDA context
+    let cuda_ctx = std::sync::Arc::new(CudaContext::new(0)?);
+    let mut cuda_ops = CudaOps::new(cuda_ctx);
+
+    // Initialize anchors (same k-means++ as CPU)
+    let mut anchors = initialize_anchors(points, n, d, config.m);
+
+    // Initialize state
+    let mut state = AnnealState::new(config.initial_temp);
+    let mut assignments = Assignments::new(n);
+    let mut prev_energy = f32::INFINITY;
+    let mut stable_iters = 0;
+
+    println!("CUDA compression: n={}, d={}, m={}", n, d, config.m);
+
+    // Main annealing loop
+    while state.iteration < config.max_iterations && !state.converged {
+        // Store old assignments
+        let old_assignments = assignments.clone();
+
+        // Step 1: Assign points to anchors (CUDA-accelerated!)
+        assignments = cuda_ops.assign_points(points, &anchors, n, d)?;
+
+        // Step 2: Compute robust statistics (CUDA)
+        let stats = cuda_ops.reduce_stats(
+            points,
+            &assignments,
+            &anchors,
+            n,
+            anchors.m,
+            d,
+        )?;
+
+        // Step 3: Update anchors (CUDA)
+        cuda_ops.update_anchors(
+            &mut anchors,
+            &stats,
+            state.temperature,
+            config.learning_rate,
+        )?;
+
+        // Step 4: Maintenance (if interval reached)
+        if state.iteration > 0 && state.iteration % config.maintenance_interval == 0 {
+            // Merge close anchors (threshold: 10% of average anchor distance)
+            let avg_anchor_dist = estimate_average_anchor_distance(&anchors);
+            let merge_threshold = avg_anchor_dist * 0.1;
+            let merged = ops::merge_close_anchors(&mut anchors, &mut assignments, merge_threshold, d);
+
+            // Split overloaded anchors (threshold: 2x expected count)
+            let expected_count = n / anchors.m;
+            let split_threshold = expected_count * 2;
+            let split = ops::split_overloaded_anchors(
+                &mut anchors,
+                &mut assignments,
+                points,
+                n,
+                d,
+                split_threshold,
+                state.temperature * 2.0, // variance threshold scales with temperature
+            );
+
+            if merged > 0 || split > 0 {
+                println!("  Maintenance: merged={}, split={}, anchors={}",
+                         merged, split, anchors.m);
+            }
+        }
+
+        // Compute energy and changes (CPU)
+        state.energy = ops::compute_energy(points, &anchors, &assignments);
+        state.assignment_changes = ops::count_assignment_changes(&old_assignments, &assignments);
+
+        // Check convergence: both energy stable AND assignments stable
+        let energy_change = (state.energy - prev_energy).abs();
+        let energy_stable = energy_change < config.energy_tolerance;
+        let assignments_stable = state.assignment_changes < config.min_assignment_changes;
+
+        if energy_stable && assignments_stable {
+            stable_iters += 1;
+            // Require 3 consecutive stable iterations to declare convergence
+            if stable_iters >= 3 {
+                state.converged = true;
+                println!("CUDA: Converged after {} iterations (stable for {} iters)",
+                         state.iteration, stable_iters);
+            }
+        } else {
+            stable_iters = 0; // Reset if not stable
+        }
+
+        // Cool temperature
+        state.cool(config.cooling_rate);
+
+        // Log progress (minimal)
+        if state.iteration % 10 == 0 {
+            println!(
+                "CUDA Iter {}: T={:.4}, E={:.4}, delta_E={:.6}, Changes={}",
                 state.iteration, state.temperature, state.energy, energy_change, state.assignment_changes
             );
         }
