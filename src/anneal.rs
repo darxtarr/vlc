@@ -94,7 +94,28 @@ pub fn compress(
         
         // Step 4: Maintenance (if interval reached)
         if state.iteration > 0 && state.iteration % config.maintenance_interval == 0 {
-            // TODO: Implement merge/split operations
+            // Merge close anchors (threshold: 10% of average anchor distance)
+            let avg_anchor_dist = estimate_average_anchor_distance(&anchors);
+            let merge_threshold = avg_anchor_dist * 0.1;
+            let merged = ops::merge_close_anchors(&mut anchors, &mut assignments, merge_threshold, d);
+
+            // Split overloaded anchors (threshold: 2x expected count)
+            let expected_count = n / anchors.m;
+            let split_threshold = expected_count * 2;
+            let split = ops::split_overloaded_anchors(
+                &mut anchors,
+                &mut assignments,
+                points,
+                n,
+                d,
+                split_threshold,
+                state.temperature * 2.0, // variance threshold scales with temperature
+            );
+
+            if merged > 0 || split > 0 {
+                println!("  Maintenance: merged={}, split={}, anchors={}",
+                         merged, split, anchors.m);
+            }
         }
         
         // Compute energy and changes
@@ -263,7 +284,28 @@ pub async fn compress_gpu(
 
         // Step 4: Maintenance (if interval reached)
         if state.iteration > 0 && state.iteration % config.maintenance_interval == 0 {
-            // TODO: Implement merge/split operations
+            // Merge close anchors (threshold: 10% of average anchor distance)
+            let avg_anchor_dist = estimate_average_anchor_distance(&anchors);
+            let merge_threshold = avg_anchor_dist * 0.1;
+            let merged = ops::merge_close_anchors(&mut anchors, &mut assignments, merge_threshold, d);
+
+            // Split overloaded anchors (threshold: 2x expected count)
+            let expected_count = n / anchors.m;
+            let split_threshold = expected_count * 2;
+            let split = ops::split_overloaded_anchors(
+                &mut anchors,
+                &mut assignments,
+                points,
+                n,
+                d,
+                split_threshold,
+                state.temperature * 2.0, // variance threshold scales with temperature
+            );
+
+            if merged > 0 || split > 0 {
+                println!("  Maintenance: merged={}, split={}, anchors={}",
+                         merged, split, anchors.m);
+            }
         }
 
         // Compute energy and changes (CPU)
@@ -338,4 +380,32 @@ fn compute_compression_ratio(
         };
 
     compressed_bytes as f32 / original_bytes as f32
+}
+
+/// Estimate average distance between anchors (for merge threshold)
+fn estimate_average_anchor_distance(anchors: &AnchorSet) -> f32 {
+    if anchors.m < 2 {
+        return 1.0; // Default if too few anchors
+    }
+
+    let mut total_dist = 0.0f32;
+    let mut count = 0usize;
+
+    // Sample a subset of anchor pairs to estimate average distance
+    let sample_size = (anchors.m * 2).min(100); // Sample up to 100 pairs
+
+    for i in 0..sample_size.min(anchors.m) {
+        let j = (i + anchors.m / 2) % anchors.m; // Sample distant pairs
+        let anchor_i = anchors.get_anchor(i);
+        let anchor_j = anchors.get_anchor(j);
+
+        total_dist += l2_distance_f16(anchor_i, anchor_j).sqrt();
+        count += 1;
+    }
+
+    if count > 0 {
+        total_dist / count as f32
+    } else {
+        1.0
+    }
 }

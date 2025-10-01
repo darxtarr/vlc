@@ -8,6 +8,7 @@ pub mod io;
 pub mod ops;
 pub mod anneal;
 pub mod gpu;
+pub mod retrieval;
 
 // Re-export core types
 pub use types::{CompressedIndex, AnchorSet, Assignments};

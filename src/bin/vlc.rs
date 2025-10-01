@@ -10,6 +10,7 @@ fn main() {
         eprintln!("Commands:");
         eprintln!("  index --emb <file> --d <dim> --m <anchors> --out <path>");
         eprintln!("  info --idx <path>");
+        eprintln!("  query --idx <path> --k <k> (test retrieval with synthetic queries)");
         eprintln!("  test  (run with synthetic data)");
         eprintln!("  test-gpu  (run GPU compression test)");
         std::process::exit(1);
@@ -247,6 +248,107 @@ fn main() {
             println!("  Energy difference: {:.6} ({:.2}%)",
                 energy_diff,
                 energy_diff / cpu_result.metadata.final_energy * 100.0);
+        }
+
+        "query" => {
+            println!("Testing retrieval with synthetic queries...");
+
+            // First, compress synthetic data to get an index
+            println!("\n1. Creating compressed index...");
+            let n = 1000;
+            let d = 64;
+            let m = 20;
+
+            // Generate synthetic data (3 clusters)
+            let mut points = Vec::with_capacity(n * d);
+            let cluster_centers = vec![
+                (0.0f32, 0.0f32),
+                (5.0f32, 5.0f32),
+                (10.0f32, 0.0f32),
+            ];
+
+            for point_idx in 0..n {
+                let cluster = point_idx % 3;
+                let (cx, cy) = cluster_centers[cluster];
+
+                for dim in 0..d {
+                    let noise = (point_idx as f32 * 0.01 + dim as f32 * 0.001).sin() * 0.5;
+                    let val = if dim < 2 {
+                        match dim {
+                            0 => cx + noise,
+                            1 => cy + noise,
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        noise
+                    };
+                    points.push(f16::from_f32(val));
+                }
+            }
+
+            // Compress
+            let config = vlc::AnnealingConfig {
+                m,
+                initial_temp: 1.0,
+                cooling_rate: 0.01,
+                learning_rate: 0.1,
+                trim_percent: 0.1,
+                max_iterations: 100,
+                energy_tolerance: 1e-4,
+                min_assignment_changes: 5,
+                maintenance_interval: 20,
+            };
+
+            let index = vlc::compress(&points, n, d, config);
+            println!("   Compressed: {} anchors, {:.2}% ratio",
+                     index.anchor_set.m, index.metadata.compression_ratio * 100.0);
+
+            // 2. Generate test queries (from each cluster)
+            println!("\n2. Generating test queries...");
+            let num_queries = 10;
+            let mut queries = Vec::with_capacity(num_queries * d);
+
+            for i in 0..num_queries {
+                let cluster = i % 3;
+                let (cx, cy) = cluster_centers[cluster];
+
+                for dim in 0..d {
+                    let noise = (i as f32 * 0.02 + dim as f32 * 0.002).cos() * 0.3;
+                    let val = if dim < 2 {
+                        match dim {
+                            0 => cx + noise,
+                            1 => cy + noise,
+                            _ => unreachable!(),
+                        }
+                    } else {
+                        noise
+                    };
+                    queries.push(f16::from_f32(val));
+                }
+            }
+
+            // 3. Perform queries
+            println!("\n3. Running queries...");
+            let k = 10;
+            let start = std::time::Instant::now();
+
+            for i in 0..num_queries {
+                let query_start = i * d;
+                let query = &queries[query_start..query_start + d];
+                let results = index.query(query, k, None);
+
+                println!("   Query {}: found {} neighbors", i + 1, results.len());
+                if !results.is_empty() {
+                    println!("      Top result: point {} at distance {:.4}",
+                             results[0].0, results[0].1.sqrt());
+                }
+            }
+
+            let elapsed = start.elapsed();
+            println!("\n4. Performance:");
+            println!("   Total time: {:.2}ms", elapsed.as_secs_f64() * 1000.0);
+            println!("   Per query: {:.2}ms", elapsed.as_secs_f64() * 1000.0 / num_queries as f64);
+            println!("   Queries/sec: {:.0}", num_queries as f64 / elapsed.as_secs_f64());
         }
 
         _ => {
